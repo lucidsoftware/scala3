@@ -262,9 +262,7 @@ object SourceFile {
   def virtual(uri: URI, content: String): SourceFile =
     SourceFile(new VirtualFile(Paths.get(uri), content.getBytes(StandardCharsets.UTF_8)), content.toCharArray)
 
-  /** Returns the relative path of `source` within the `reference` path
-   *
-   *  It returns the absolute path of `source` if it is not contained in `reference`.
+  /** Returns the relative path of `source` within the `reference` path.
    */
   def relativePath(source: SourceFile, reference: String): String = {
     val file = source.file
@@ -295,7 +293,7 @@ object SourceFile {
         val path = refPath.relativize(sourcePath)
         path.iterator.asScala.mkString("/")
       else
-        sourcePath.toString
+        jpath.toString
   }
 
   /** Return true if file is a script:
