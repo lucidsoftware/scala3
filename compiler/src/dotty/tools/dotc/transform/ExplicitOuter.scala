@@ -140,9 +140,40 @@ object ExplicitOuter {
    */
   private def outerClass(cls: ClassSymbol)(using Context): Symbol = {
     val encl = cls.owner.enclosingClass
+
+    /** Flatten an `AndType` into its leaf component types. */
+    def flattenAndType(tp: Type): List[Type] = tp match {
+      case tp: AndType => flattenAndType(tp.tp1) ++ flattenAndType(tp.tp2)
+      case _ => tp :: Nil
+    }
+
+    /** Replicate Scala 2's `intersectionDominator`, located in
+     * `src/reflect/scala/reflect/internal/transform/Erasure.scala`. This picks the first non-trait class in the
+     * intersection type, or the first component if all are traits.
+     */
+    def intersectionDominator(tp: AndType): Symbol = {
+      val components = flattenAndType(tp)
+      val firstNonTraitClass = components.find { tp =>
+        val symbol = tp.classSymbol
+
+        symbol.exists && symbol.isClass && !symbol.is(Trait)
+      }
+
+      firstNonTraitClass.map(_.classSymbol).getOrElse(components.head.classSymbol)
+    }
+
     if (cls.is(Scala2x))
       encl.asClass.classInfo.selfInfo match {
         case tp: TypeRef => tp.classSymbol
+        case tp: AppliedType =>
+          val symbol = tp.classSymbol
+
+          if symbol.exists then symbol else encl
+
+        case tp: AndType =>
+          val symbol = intersectionDominator(tp)
+          if symbol.exists then symbol else encl
+
         case self: Symbol => self
         case _ => encl
       }
