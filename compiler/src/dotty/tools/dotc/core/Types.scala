@@ -3010,9 +3010,41 @@ object Types extends TypeUtils {
       case TypeBounds(_, hi) =>
         if (symbol.isOpaqueAlias)
           symbol.opaqueAlias.asSeenFrom(prefix, symbol.owner).orElse(hi) // orElse can happen for malformed input
+        // The prefix-refined lookup exists to keep Scala 3's erasure of abstract type members in sync with Scala 2's
+        // (see `prefixRefinedUpperBound`). Only apply it once we're actually erasing — earlier phases like PostTyper
+        // don't need it, and calling `findMember` on every `translucentSuperType` at typer time is expensive.
+        else if ctx.phase.erasedTypes then prefixRefinedUpperBound.orElse(hi)
         else hi
       case _ => underlying
     }
+
+
+    /**
+     * If the prefix's type—or, when the prefix is a `ThisType`, the enclosing class's self-type — carries a refinement
+     * for the referenced abstract type member, return the refinement's upper bound. Otherwise return `NoType`.
+     *
+     * Scala 2's type erasure walks the self-type when erasing a reference to an abstract type member and picks up the
+     * refinement's bound. Scala 3's default `info` combines the base declaration's bound with the refinement's,
+     * producing an intersection whose erasure differs from Scala 2's when both components are unrelated traits.
+     * Matching Scala 2 here keeps `invokevirtual` descriptors emitted by Scala 3 in-sync with methods that Scala 2
+     * compiled.
+     */
+    private def prefixRefinedUpperBound(using Context): Type = prefix match
+      case _: Types.ThisType | _: Types.TermRef =>
+        // Look up the member on `prefix` directly — this walks the class hierarchy, honors overriding type-member
+        // declarations, and merges refinements/self-types on the way, matching what Scala 2's `asSeenFrom` does when
+        // erasing a reference to an abstract type member.
+        //
+        // The lookup can trigger completion (recursive self-types like `trait X[T <: X[T]] { self: T => }` cycle
+        // while completing the self val's info). In that case bail out and let the caller fall back to `hi`.
+        try
+          prefix.nonPrivateMember(name).info match
+            case TypeAlias(aliased) => aliased
+            case TypeBounds(_, hi) => hi
+            case _ => NoType
+        catch case _: CyclicReference => NoType
+
+      case _ => NoType
 
     /** Hook that can be called from creation methods in TermRef and TypeRef */
     def validated(using Context): this.type =
