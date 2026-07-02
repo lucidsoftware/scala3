@@ -3010,9 +3010,41 @@ object Types extends TypeUtils {
       case TypeBounds(_, hi) =>
         if (symbol.isOpaqueAlias)
           symbol.opaqueAlias.asSeenFrom(prefix, symbol.owner).orElse(hi) // orElse can happen for malformed input
+        else if ctx.phase.id >= Phases.erasurePhase.id then selfTypeRefinedUpperBound.orElse(hi)
         else hi
       case _ => underlying
     }
+
+    /**
+     * When this TypeRef refers to an abstract type member whose enclosing class has a self-type refining that member
+     * (e.g. `trait T extends Base { self: Base { type M <: Narrower } => ... }`), return the
+     * refinement's upper bound alone. Otherwise return `NoType`.
+     *
+     * Scala 2's erasure references the refinement's synthetic symbol directly, so it emits descriptors using just the
+     * refinement's bound — ignoring the inherited base declaration. Scala 3, in contrast, computes `.info` for the
+     * reference as the intersection of the inherited and refined bounds; the
+     * subsequent `Scala2Erasure.intersectionDominator` picks the wrong side when the two bounds are unrelated traits.
+     * Matching Scala 2 here — by returning only the refinement's bound at erasure—keeps the descriptors emitted by
+     * Scala 3 in sync with the ones baked into Scala 2 bytecode.
+     */
+    private def selfTypeRefinedUpperBound(using Context): Type = prefix match
+      case pre: Types.ThisType =>
+        pre.cls.classDenot.givenSelfType match
+          case NoType => NoType
+          case selfT  => refinementUpperBound(selfT.dealias)
+
+      case _ => NoType
+
+    private def refinementUpperBound(tp: Type)(using Context): Type = tp.dealias match
+      case RefinedType(parent, rname, TypeAlias(aliased)) if rname == name => aliased
+      case RefinedType(parent, rname, TypeBounds(_, hi)) if rname == name => hi
+      case RefinedType(parent, _, _) => refinementUpperBound(parent)
+      case AndType(tp1, tp2) =>
+        val r1 = refinementUpperBound(tp1)
+
+        if r1.exists then r1 else refinementUpperBound(tp2)
+
+      case _ => NoType
 
     /** Hook that can be called from creation methods in TermRef and TypeRef */
     def validated(using Context): this.type =
