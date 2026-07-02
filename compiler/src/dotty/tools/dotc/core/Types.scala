@@ -3010,9 +3010,66 @@ object Types extends TypeUtils {
       case TypeBounds(_, hi) =>
         if (symbol.isOpaqueAlias)
           symbol.opaqueAlias.asSeenFrom(prefix, symbol.owner).orElse(hi) // orElse can happen for malformed input
-        else hi
+        else prefixRefinedUpperBound.orElse(hi)
       case _ => underlying
     }
+
+    /**
+     * If the prefix's type—or, when the prefix is a `ThisType`, the enclosing class's self-type — carries a refinement
+     * for the referenced abstract type member, return the refinement's upper bound. Otherwise return `NoType`.
+     *
+     * Scala 2's type erasure walks the self-type when erasing a reference to an abstract type member and picks up the
+     * refinement's bound. Scala 3's default `info` combines the base declaration's bound with the refinement's,
+     * producing an intersection whose erasure differs from Scala 2's when both components are unrelated traits.
+     * Matching Scala 2 here keeps `invokevirtual` descriptors emitted by Scala 3 in-sync with methods that Scala 2
+     * compiled.
+     */
+    private def prefixRefinedUpperBound(using Context): Type =
+      def refinementUpperBound(tpe: Type): Type = tpe.dealias match
+        case RefinedType(parent, rname, rinfo) =>
+          if rname == name then
+            rinfo match
+              case TypeAlias(aliased) => aliased
+              case TypeBounds(_, hi) => hi
+              case _ => refinementUpperBound(parent)
+          else refinementUpperBound(parent)
+
+        case AndType(tp1, tp2) =>
+          val fromLeft = refinementUpperBound(tp1)
+
+          if fromLeft.exists then fromLeft else refinementUpperBound(tp2)
+
+        case _ => NoType
+
+      // Walk the prefix's class and its base classes, checking each one's self-type for a refinement of `name`. This
+      // picks up refinements introduced by a subclass of the declaring class—e.g. when the enclosing trait's self-type
+      // refines an inherited abstract type member's bound.
+      def searchBaseClasses(cls: ClassSymbol): Type =
+        // Use `unforcedInfo` on a self-symbol rather than `.info` so we don't trigger completion (which can cycle on
+        // recursive self-types like `trait X[T <: X[T]] { self: T => }`).
+        val selfTpe = cls.classInfo.selfInfo match
+          case selfSym: Symbol => selfSym.denot.unforcedInfo.getOrElse(NoType)
+          case selfTpe: Type => selfTpe
+
+        val fromSelf = if selfTpe.exists then refinementUpperBound(selfTpe) else NoType
+
+        if fromSelf.exists then fromSelf
+        else cls.classInfo.parents.iterator
+          .flatMap { parent =>
+            parent.classSymbol match
+              case parentCls: ClassSymbol => Some(searchBaseClasses(parentCls))
+              case _ => None
+          }
+          .find(_.exists)
+          .getOrElse(NoType)
+
+      prefix match
+        case prefix: Types.ThisType =>
+          prefix.tref.symbol match
+            case cls: ClassSymbol => searchBaseClasses(cls)
+            case _ => NoType
+
+        case _ => NoType
 
     /** Hook that can be called from creation methods in TermRef and TypeRef */
     def validated(using Context): this.type =
